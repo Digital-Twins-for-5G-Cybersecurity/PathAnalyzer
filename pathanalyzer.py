@@ -1,6 +1,8 @@
 import r2pipe       # for radare api calls 
 import argparse     # for argument parsing
+import threading    # for multithreading output handler
 import rich         # for cleaner terminal output
+from output_handler import OutputHandler
 import sys
 import os
 
@@ -11,54 +13,10 @@ OUTPUT_TEXT_FLAG = None
 OUTPUT_JSON_FLAG = None
 r2 = None
 
-def establish_breakpoints():
-    """ Gets all of the functions and labels in the executable and sets a breakpoint at all of them 
+# Shared variables for multithreading
+OUTPUT_DATA = []
+OUTPUT_FINISHED = False
 
-    Args:
-        r2 (r2 object): the object returned by opening an r2pipe
-    """
-    
-    global r2
-    
-    r2.cmd("db main")
-    r2.cmd("dc")
-    
-    if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
-        print("Retrieving all forward edges...") 
-    # retrieve every call instruction in the executable as a json object    
-    allCalls = r2.cmd("/ao call")
-    
-    # print all call instructions if verbosity flag is met
-    if (VERY_VERBOSE_FLAG):
-        print(allCalls)
-        
-    if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
-        print("Retrieving all backward edges...") 
-    
-    # retrieve every call instruction in the executable as a json object    
-    allRets = r2.cmd("/ao ret")
-    
-    # print all ret instructions if verbosity flag is met
-    if (VERY_VERBOSE_FLAG):
-        print(allRets)
-    
-    if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
-        print("Setting all breakpoints...") 
-        
-    # set a breakpoint at every call instruction
-    allCalls = allCalls.split('\n')[:-1]
-    for line in allCalls:
-        line = line.split(" ")
-        line = [x for x in line if x != ""]
-        
-        r2.cmd("db " + line[0])
-        
-    # set a breakpoint at every ret instruction
-    allRets = allRets.split('\n')[:-1]
-    for line in allRets:
-        line = line.split(" ")
-        line = [x for x in line if x != ""]
-        r2.cmd("db " + line[0])
 
 
 def init_analysis(executable, arguments):
@@ -76,7 +34,6 @@ def init_analysis(executable, arguments):
     # strip single quotes from strings and format for r2pipe
     executable = executable[1:-1]
     arguments = arguments[1:-1]
-    arguments = arguments.split(" ")
 
     
     # initialize r2pipe
@@ -88,34 +45,151 @@ def init_analysis(executable, arguments):
     # analyze executable file and print in terminal based on verbosity 
     if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
         print("Analyzing executable file. This can take some time...")
-    r2.cmd("doo")
+    r2.cmd("ood " + arguments)
     r2.cmd("aaa")
     if (VERY_VERBOSE_FLAG):
         print()
-    r2.cmd("ds")
+    r2.cmd("db main")
+    r2.cmd("dc")
     
+def establish_breakpoints():
+    """ Gets all of the functions and labels in the executable and sets a breakpoint at all of them 
+
+    Args:
+        r2 (r2 object): the object returned by opening an r2pipe
+    """
+    
+    global r2
+    
+    if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
+        print("Retrieving all function addresses...") 
+    # retrieve every function address in the executable as a json object    
+    allFunctions = r2.cmdj("aflj")
+    all_func_names = []
+    
+    # print all functions  if verbosity flag is met
+    if (VERY_VERBOSE_FLAG):
+        print(r2.cmd("afl"))
+    
+    
+    if (VERBOSE_FLAG or VERY_VERBOSE_FLAG):
+        print("Setting forward edge breakpoints...") 
+        
+    # Establish breakpoints at all functions
+    for func in allFunctions:
+        r2.cmd("db " + func["name"]) 
+        all_func_names.append(func["name"])
+        
+        #Establish breakpoints at all function call XREFs
+        if "codexrefs" in func:
+            for call in func["codexrefs"]:
+                r2.cmd("db " + str(call["addr"]))
+    
+    # Establish breakpoints at all jmp xrefs
+    jmp_instrs = r2.cmd("/ao jmp").split('\n')
+    for line in jmp_instrs:
+        line = line.split(" ")
+        line = [x for x in line if x]
+        if len(line) != 0 and line[-1] in all_func_names:
+            r2.cmd("db " + line[0])
+          
+def handle_output(filename, file_type):
+    """ Handles the file outputs and types
+
+    Args:
+        filename (String): The name of the file 
+        file_type (String): The type of the fie
+    """
+    global OUTPUT_DATA
+    global OUTPUT_FINISHED
+    
+    handler = OutputHandler(filename, file_type)
+    current_index = 0;
+    while not OUTPUT_FINISHED or len(OUTPUT_DATA) > current_index:
+        if len(OUTPUT_DATA) > current_index:
+            handler.appendJSON(OUTPUT_DATA[current_index])
+            current_index += 1;
+    
+    handler.closeFile()
+        
 def execute_program():
     """ Runs the program logging all forward and backward branches
     """
+    global OUTPUT_FINISHED
     global r2
     
-    # Running file and logging fucntion calls
-    r2.cmd("dc")
-    outFrom = r2.cmdj("afij")
-    r2.cmd("ds")
-    outTo = r2.cmdj("afij")
-    print("CALL --", outFrom[0]["name"], "->", outTo[0]["name"] )
+    # Define shadow call Stack and return address dictionary
+    call_stack = []
+    ret_addresses = {}
     
-    r2.cmd("dc")
-    outFrom = r2.cmdj("afij")
-    r2.cmd("ds")
-    outTo = r2.cmdj("afij")
-    print("UNDEFINED --", outFrom[0]["name"], "->", outTo[0]["name"] )
+    if VERBOSE_FLAG or VERY_VERBOSE_FLAG:
+        print("Executing Program...")
+        
+    while True:
+        r2.cmd("dc")
+        # Is address at breakpoint in return dictionary
+        current_address = int(r2.cmd("dr? rip"), 16)        # get the current address
+        if current_address in ret_addresses:                # This means it is a return address
+            corr_function = ret_addresses[current_address]
+            function_pop = call_stack.pop()
+            while (function_pop != corr_function):          # Pop Stack until coorelating function name is reached
+                second_function = call_stack.pop()
+
+                OUTPUT_DATA.append({"instr":"RET", "from": function_pop, "to": second_function}) 
+                
+                if VERY_VERBOSE_FLAG:
+                    print("RET  --", second_function, "<--", function_pop)
+                function_pop = second_function
+                
+            # Get current function name
+            to_func = r2.cmdj("afij")
+            if len(to_func) == 0:
+                to_func = "UNKNOWN"
+            else:
+                to_func = to_func[0]["name"]
+                
+            OUTPUT_DATA.append({"instr":"RET", "from": function_pop, "to": to_func})
+            
+            if VERY_VERBOSE_FLAG:
+                print("RET  --", to_func, "<--", function_pop)
+        
+        else:                                               # Function gets called 
+            current_address_info = r2.cmdj("aoj @ rip")
+            if len(current_address_info) == 0:
+                break
+            opcode_size = current_address_info[0]["size"]
+            from_func = r2.cmdj("afij")
+            if len(from_func) == 0:
+                from_func = "UNKNOWN"
+            else:
+                from_func = from_func[0]["name"] 
+                
+            ret_address = current_address + opcode_size
+            r2.cmd("db " + str(ret_address))                # set breakpoint at the return address 
+            r2.cmd("dc")
+            to_func = r2.cmdj("afij")
+            if len(to_func) == 0:
+                to_func = "UNKNOWN"
+            else:
+                to_func = to_func[0]["name"]
+                
+            call_stack.append(to_func)
+            ret_addresses[ret_address] = to_func
+            
+            OUTPUT_DATA.append({"instr":"CALL", "from": from_func, "to": to_func}) 
+            
+            if VERY_VERBOSE_FLAG:
+                print("CALL --", from_func, "-->", to_func)
     
+    program_exit_status = int(r2.cmd("dr rdi"), 16)
+    
+    OUTPUT_DATA.append({"exit_status": str(program_exit_status)})
+    
+    if VERBOSE_FLAG or VERY_VERBOSE_FLAG:
+        print("Program exited with status:", program_exit_status)
         
-        
-
-
+    OUTPUT_FINISHED = True
+    
 def main(argv):
     """Main functionality of the program
     Args:
@@ -147,11 +221,23 @@ def main(argv):
     if args.output_json != None:
         OUTPUT_JSON_FLAG = args.output_json
         
+        
+    if OUTPUT_JSON_FLAG:
+        filename = args.output_json[1:-1]
+        handle_json_output = threading.Thread(target = handle_output, args=(filename, ".json",))
+        handle_json_output.start()
     
     # Analyze given file with radare2
     init_analysis(str(args.executable), str(args.arguments))
     establish_breakpoints()
-    execute_program()
+    program_execution = threading.Thread(target=execute_program)
+    program_execution.start()
+    
+    program_execution.join()
+    
+    if OUTPUT_JSON_FLAG:
+        handle_json_output.join()
+    
     return 0
     
     

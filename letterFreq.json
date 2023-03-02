@@ -1,0 +1,11 @@
+[
+{"instr": "CALL", "from": "main", "to": "sym.imp.printf"}
+{"instr": "RET", "from": "sym.imp.printf", "to": "main"}
+{"instr": "CALL", "from": "main", "to": "sym.__do_global_dtors_aux"}
+{"instr": "CALL", "from": "sym.__do_global_dtors_aux", "to": "sym.imp.__cxa_finalize"}
+{"instr": "RET", "from": "sym.imp.__cxa_finalize", "to": "sym.__do_global_dtors_aux"}
+{"instr": "CALL", "from": "sym.deregister_tm_clones", "to": "sym.deregister_tm_clones"}
+{"instr": "CALL", "from": "sym._fini", "to": "sym._fini"}
+{"instr": "CALL", "from": "UNKNOWN", "to": "sym._fini"}
+{"exit_status": "1"}
+]
