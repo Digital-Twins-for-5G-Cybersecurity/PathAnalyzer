@@ -94,7 +94,7 @@ def establish_breakpoints():
             r2.cmd("db " + line[0])
           
 def handle_output(filename, file_type):
-    """ Handles the file outputs and types
+    """ Handles the file outputs and types as a thread
 
     Args:
         filename (String): The name of the file 
@@ -130,9 +130,9 @@ def execute_program():
         # Is address at breakpoint in return dictionary
         current_address = int(r2.cmd("dr? rip"), 16)        # get the current address
         if current_address in ret_addresses:                # This means it is a return address
-            corr_function = ret_addresses[current_address]
+            corr_function = ret_addresses.pop(current_address)
             function_pop = call_stack.pop()
-            while (function_pop != corr_function):          # Pop Stack until coorelating function name is reached
+            while (function_pop != corr_function and len(call_stack) > 0):          # Pop Stack until coorelating function name is reached
                 second_function = call_stack.pop()
 
                 OUTPUT_DATA.append({"instr":"RET", "from": function_pop, "to": second_function}) 
